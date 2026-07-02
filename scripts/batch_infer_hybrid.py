@@ -102,7 +102,12 @@ OUTPUT_DIR = Path("output/hybrid")
 
 
 def pick_device() -> torch.device:
-    """Best available device: STRUM_DEVICE override, else cuda > mps > cpu."""
+    """Best available device: STRUM_DEVICE override, else cuda > mps > cpu.
+
+    Set the STRUM_DEVICE env var (e.g. "cpu", "mps", "cuda", "cuda:0") to force
+    a specific device, bypassing autodetection entirely. Useful for A/B'ing
+    CPU vs. accelerator runs or working around a backend-specific bug.
+    """
     env = os.environ.get("STRUM_DEVICE")
     if env:
         return torch.device(env)

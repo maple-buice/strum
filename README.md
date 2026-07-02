@@ -153,7 +153,19 @@ python -m venv .venv && source .venv/bin/activate
 pip install -e .
 ```
 
-Model checkpoints (~6 GB) are not committed; download from the releases page or train locally (see below).
+Model checkpoints (~6 GB) are not committed; download from [HuggingFace: opria123/strum](https://huggingface.co/opria123/strum) or train locally (see below).
+
+### Apple Silicon (MPS)
+
+No CUDA GPU? STRUM auto-detects Apple's Metal backend — install the same way (no CUDA extras needed) and run with the MPS fallback enabled:
+
+```bash
+PYTORCH_ENABLE_MPS_FALLBACK=1 python scripts/batch_infer_hybrid.py \
+  --input-dir /path/to/songs/ \
+  --output-dir /path/to/output/
+```
+
+Device selection is `STRUM_DEVICE` env override → CUDA → MPS → CPU (see `pick_device()` in `scripts/batch_infer_hybrid.py`); set `STRUM_DEVICE=cpu` to force CPU. Measured on an M1 Max: ~5x faster end-to-end than CPU, with expert-lane note counts within 1% of the CPU output.
 
 ### Generate Charts for a Song
 
@@ -167,7 +179,7 @@ python scripts/batch_pipeline.py \
 
 # Drums only (faster, no Demucs vocals/keys/bass passes)
 python scripts/batch_infer_hybrid.py \
-  --songs-dir /path/to/songs/ \
+  --input-dir /path/to/songs/ \
   --output-dir /path/to/output/
 ```
 
