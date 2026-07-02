@@ -1790,8 +1790,22 @@ song_length = {duration_ms}
         # Drums
         if "drums" in stems:
             try:
+                # Low-RMS drums-stem fallback (shared with batch_infer_hybrid):
+                # if the separated drums stem is near-silent, detect on a
+                # drums+other mix or the original full mix instead.
+                from batch_infer_hybrid import (
+                    STEM_FALLBACK_ENABLED,
+                    resolve_drums_fallback,
+                )
+                drums_input = stems["drums"]
+                if STEM_FALLBACK_ENABLED:
+                    drums_input = resolve_drums_fallback(
+                        drums_input,
+                        full_mix_path=audio_path,
+                        other_path=stems.get("other"),
+                    )
                 drums_chart = self.transcribe_drums(
-                    stems["drums"], tempo_bpm,
+                    drums_input, tempo_bpm,
                     song_folder=song_folder,
                     phase_offset_ms=phase_offset_ms_for_align,
                 )

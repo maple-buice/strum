@@ -700,6 +700,96 @@ def apply_tomcym_reclassification(
 # Audio processing
 # ══════════════════════════════════════════════════════════════
 
+# ── Low-RMS drums-stem fallback routing ────────────────────────
+# Demucs' drums stem is near-silent for songs whose percussion it doesn't
+# recognize as a drum kit (pit/front-ensemble percussion, some orchestral
+# material), which collapses onset detection to ~0 recall. When the stem's
+# median 1 s-window RMS (22050 Hz mono — same formula as the in-envelope
+# screen in scripts/paper/build_v4_envelope_benchmark.py) is below a floor,
+# route onset detection + classification to fallback audio instead.
+#   STRUM_STEM_FALLBACK=0       → disable (exactly the previous behavior)
+#   STRUM_DRUMS_RMS_FLOOR=x     → override the floor (default 0.018)
+#   STRUM_STEM_FALLBACK_MODE    → force fallback source: "mix" (original full
+#                                 mix — the default; it measured best) or
+#                                 "other" (drums+other stem mix).
+STEM_FALLBACK_ENABLED = os.environ.get("STRUM_STEM_FALLBACK", "1") == "1"
+DRUMS_RMS_FLOOR = float(os.environ.get("STRUM_DRUMS_RMS_FLOOR", "0.018"))
+STEM_FALLBACK_MODE = os.environ.get("STRUM_STEM_FALLBACK_MODE", "")
+
+
+def median_window_rms(audio_path: Path) -> float:
+    """Median RMS over non-overlapping 1 s windows at 22050 Hz mono.
+
+    Same formula as the paper's in-envelope screen
+    (scripts/paper/build_v4_envelope_benchmark.py).
+    """
+    y, sr = librosa.load(str(audio_path), sr=22050, mono=True)
+    win = sr
+    n_win = max(1, len(y) // win)
+    rms_per = np.array(
+        [np.sqrt(np.mean(y[i * win:(i + 1) * win] ** 2)) for i in range(n_win)]
+    )
+    return float(np.median(rms_per))
+
+
+def resolve_drums_fallback(
+    drums_path: Path,
+    full_mix_path: Path,
+    other_path: Path | None = None,
+) -> Path:
+    """Return the audio to run drums detection on, applying low-RMS fallback.
+
+    Checks the separated drums stem's median 1 s RMS against DRUMS_RMS_FLOOR.
+    Above the floor: returns `drums_path` unchanged. Below it: returns fallback
+    audio — the original full mix by default (it outperformed the drums+other
+    stem mix when measured), or a drums+other mix (built lazily next to
+    `drums_path` from `other_path`, cached as drums_other.wav) when
+    STRUM_STEM_FALLBACK_MODE=other. If the `other` stem isn't on disk (e.g. a
+    Demucs cache from a run predating this feature), falls back to the full
+    mix and says so.
+    """
+    rms = median_window_rms(drums_path)
+    logger.info(
+        f"  Drums stem RMS check: median 1s RMS = {rms:.4f} "
+        f"(floor {DRUMS_RMS_FLOOR:.4f})"
+    )
+    if rms >= DRUMS_RMS_FLOOR:
+        return drums_path
+
+    logger.warning(
+        f"  ⚠ Drums stem below RMS floor ({rms:.4f} < {DRUMS_RMS_FLOOR:.4f}) — "
+        f"using fallback audio for onset detection"
+    )
+    mode = STEM_FALLBACK_MODE if STEM_FALLBACK_MODE in ("other", "mix") else ""
+    want_other = mode == "other"  # default: full mix (measured F1 71.8 vs 71.2)
+
+    if want_other:
+        if other_path is not None and other_path.exists():
+            drums_other_path = drums_path.parent / "drums_other.wav"
+            if not (drums_other_path.exists() and drums_other_path.stat().st_size > 0):
+                y_d, sr_d = sf.read(str(drums_path), dtype="float32")
+                y_o, sr_o = sf.read(str(other_path), dtype="float32")
+                if sr_d != sr_o:
+                    y_o = librosa.resample(y_o.T, orig_sr=sr_o, target_sr=sr_d).T
+                n = min(len(y_d), len(y_o))
+                y_mix = y_d[:n] + y_o[:n]
+                peak = float(np.abs(y_mix).max()) if n else 0.0
+                if peak > 1.0:
+                    y_mix = y_mix / peak
+                sf.write(str(drums_other_path), y_mix, sr_d)
+            logger.warning(
+                f"  ⚠ Stem fallback source: drums+other mix ({drums_other_path})"
+            )
+            return drums_other_path
+        logger.warning(
+            "  ⚠ STRUM_STEM_FALLBACK_MODE=other but no 'other' stem on disk "
+            "(stale Demucs cache?) — using original full mix instead"
+        )
+
+    logger.warning(f"  ⚠ Stem fallback source: original full mix ({full_mix_path})")
+    return full_mix_path
+
+
 def separate_drums(audio_path: Path, output_dir: Path) -> Path:
     """Separate drums stem using Demucs Python API."""
     from demucs.pretrained import get_model
@@ -734,6 +824,15 @@ def separate_drums(audio_path: Path, output_dir: Path) -> Path:
 
     sf.write(str(drums_path), drums_audio.T, 44100)
     logger.info(f"  Drums stem: {drums_path}")
+
+    # Keep the 'other' stem too so the low-RMS fallback can build a
+    # drums+other mix without re-running Demucs (see resolve_drums_fallback).
+    if STEM_FALLBACK_ENABLED and "other" in source_names:
+        other_idx = source_names.index("other")
+        other_audio = sources[0, other_idx].cpu().numpy()
+        other_path = demucs_out / "other.wav"
+        sf.write(str(other_path), other_audio.T, 44100)
+
     return drums_path
 
 
@@ -4530,6 +4629,12 @@ def process_song(
         logger.info("  Skipping separation (using input as drums stem)")
     else:
         drums_path = separate_drums(audio_path, song_folder)
+        if STEM_FALLBACK_ENABLED:
+            drums_path = resolve_drums_fallback(
+                drums_path,
+                full_mix_path=audio_path,
+                other_path=drums_path.parent / "other.wav",
+            )
 
     # 3. Stage 1: V14 onset detection (also captures class probs + MC head probs)
     t0 = time.time()
