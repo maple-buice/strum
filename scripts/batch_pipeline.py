@@ -113,12 +113,10 @@ class BatchPipeline:
             try:
                 from batch_infer_hybrid import (
                     load_v14_onset_detector, load_ensemble, load_tomcym_classifier,
-                    load_phase3_model, load_tom_refinement,
+                    load_phase3_model, load_tom_refinement, pick_device,
                 )
                 import torch
-                device = torch.device(self.device) if self.device else (
-                    torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
-                )
+                device = torch.device(self.device) if self.device else pick_device()
                 logger.info("Loading drums V14 onset detector + ensemble + phase3 + tom_refinement...")
                 v14_model = load_v14_onset_detector(device)
                 ensemble = load_ensemble(device)
@@ -447,7 +445,8 @@ class BatchPipeline:
                     stems[extra] = p
             return stems
 
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        from batch_infer_hybrid import pick_device
+        device = pick_device()
 
         def _run_model(model_name: str):
             model = get_model(model_name)

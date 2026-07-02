@@ -100,6 +100,18 @@ def _reset_trace():
 INPUT_DIR = Path("input")
 OUTPUT_DIR = Path("output/hybrid")
 
+
+def pick_device() -> torch.device:
+    """Best available device: STRUM_DEVICE override, else cuda > mps > cpu."""
+    env = os.environ.get("STRUM_DEVICE")
+    if env:
+        return torch.device(env)
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
+
 # ── V14 onset detector ──
 V14_CHECKPOINT = "checkpoints/drums_v14/best.pt"
 CYMBAL_ONSET_CHECKPOINT = "checkpoints/drums_cymbal_onset/best_union_f1.pt"
@@ -537,6 +549,10 @@ def load_tom_refinement(device: torch.device) -> dict | None:
             logger.info("  Tom refinement checkpoint not found — skipping")
         return None
 
+    # MPS can't run this model: its AdaptiveAvgPool2d((4,4)) needs divisible
+    # input sizes on MPS (pytorch#96056). It's tiny, so pin it to CPU there.
+    if device.type == "mps":
+        device = torch.device("cpu")
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     model = TomRefinementCNN(
         n_mel=V14_N_MELS,
@@ -703,7 +719,9 @@ def separate_drums(audio_path: Path, output_dir: Path) -> Path:
 
     wav_tensor = torch.from_numpy(y).float().unsqueeze(0)
     with torch.no_grad():
-        sources = apply_model(model_demucs, wav_tensor, progress=True)
+        sources = apply_model(
+            model_demucs, wav_tensor, progress=True, device=pick_device()
+        )
 
     source_names = model_demucs.sources
     drums_idx = source_names.index("drums")
@@ -3770,9 +3788,10 @@ def apply_tom_refinement_filter(
     if not mel_windows:
         return chart
 
-    # Batch classify
-    mel_batch = torch.stack(mel_windows).to(device)
-    cqt_batch = torch.stack(cqt_windows).to(device)
+    # Batch classify (on the model's device — may be CPU-pinned under MPS)
+    model_device = next(tom_model.parameters()).device
+    mel_batch = torch.stack(mel_windows).to(model_device)
+    cqt_batch = torch.stack(cqt_windows).to(model_device)
 
     with torch.no_grad():
         logits = tom_model(mel_batch, cqt_batch)
@@ -3966,9 +3985,10 @@ def apply_cymbal_to_tom_rescue(
     if not mel_windows:
         return chart
 
-    mel_batch = torch.stack(mel_windows).to(device)
-    cqt_batch = torch.stack(cqt_windows).to(device)
     tom_model = tom_refinement["model"]
+    model_device = next(tom_model.parameters()).device
+    mel_batch = torch.stack(mel_windows).to(model_device)
+    cqt_batch = torch.stack(cqt_windows).to(model_device)
     with torch.no_grad():
         logits = tom_model(mel_batch, cqt_batch)
         probs = torch.softmax(logits, dim=1).cpu().numpy()  # (N, 4)
@@ -4937,7 +4957,7 @@ def main():
     OUTPUT_DIR = Path(args.output_dir)
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = pick_device()
     logger.info(f"Device: {device}")
 
     # Find input songs
