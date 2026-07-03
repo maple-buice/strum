@@ -1,0 +1,127 @@
+# Drums V14 — Front-Ensemble Fine-Tune (WS5c)
+#
+# Warm-starts the stock V14 two-stage onset detector
+# (checkpoints/drums_v14/best.pt, best_f1=79.0) and fine-tunes it on the
+# synthetic front-ensemble corpus (WS5b) mixed with an E-GMD kit-drum replay
+# buffer (anti-forgetting). The MODEL section is copied verbatim from
+# configs/drums_v14.yaml so the warm-start state_dict transfers 1:1 and the
+# saved checkpoint is a drop-in for batch_infer_hybrid.load_v14_onset_detector.
+#
+# Only paths/training/loss/mixing/eval knobs differ from drums_v14.yaml —
+# see validation/ws5c/IMPLEMENTATION.md for the rationale behind each change.
+
+paths:
+  # Combined fine-tune data_dir produced by scripts/build_v14_finetune_dataset.py
+  data_dir: "datasets/ws5c_finetune"
+  output_dir: "outputs/drums_v14_ensemble_ft"
+  # NEVER points at checkpoints/drums_v14 — stock weights are read-only.
+  checkpoint_dir: "checkpoints/drums_v14_ensemble_ft"
+
+# Model Configuration — VERBATIM from configs/drums_v14.yaml (do not edit;
+# any change here breaks warm-start state_dict compatibility).
+model:
+  type: "two_stage_crnn"
+  sample_rate: 44100
+  n_mels: 128
+  hop_length: 512
+  n_fft: 2048
+  conv_channels: [64, 128, 256, 512]
+  freq_subbands: [32, 64, 96, 128]
+  subband_proj_dim: 256
+  lstm_hidden: 640
+  lstm_layers: 3
+  attention_heads: 10
+  attention_type: "flash"
+  attention_window: 512
+  dropout: 0.3
+  onset_detector_hidden: 320
+  classifier_hidden: 640
+  num_classes: 8
+  predict_velocity: true
+
+# Training Configuration — fine-tune scale (NOTES.md §5.3/§6.3):
+# short schedule, low LR, forgetting is the dominant risk not underfitting.
+training:
+  batch_size: 1               # one full song per forward pass (variable length)
+  accumulation_steps: 8       # effective batch = 8 songs (memory-safe)
+  epochs: 8                   # fine-tune, NOT the stock 40-epoch from-scratch schedule
+  learning_rate: 0.000003     # 3e-6 — an order below V13->V14's 3e-5
+  min_lr: 0.000001            # 1e-6 floor for the cosine tail
+  weight_decay: 0.0001
+  warmup_epochs: 1
+  gradient_clip: 1.0
+  num_workers: 2                # 4 -> 2: less host-RAM pressure alongside MPS
+  pin_memory: false
+
+  # Warm-start weights only (fresh AdamW, no optimizer-state resume) — mirrors
+  # the V13->V14 pattern and WS4a's "resume_from deliberately removed".
+  warm_start: "checkpoints/drums_v14/best.pt"
+
+  # Train-time chunking (scripts/train_drums_v14.py): backward through a
+  # full song's flash-attention/LSTM graph exceeds MPS memory (the 2026-07-02
+  # kernel panic — SDPA on MPS has no fused flash kernel and materializes the
+  # full T×T attention matrix). Songs are split into <=30 s windows for the
+  # train loop only; each window is one gradient-accumulation unit. Eval
+  # stays full-song under no_grad, which fits. 0 disables chunking.
+  chunk_seconds: 30
+
+  # 360 -> 150: this is a SKIP filter (drums_v14_dataset.py:127), not a
+  # truncation. Keeps every synthetic piece (max ~93 s); drops 31 of the 107
+  # long E-GMD replay clips to bound peak activation memory on MPS after the
+  # 2026-07-02 crash. The WeightedRandomSampler re-weights by count, so the
+  # 75/25 synthetic/replay mix is unchanged.
+  max_song_duration_sec: 150
+
+  # Early stopping — composite (scripts/train_drums_v14.py):
+  #   primary : synthetic-val onset frame-F1 (maximize)
+  #   guard   : E-GMD-val onset frame-F1 must not drop > egmd_guard_drop points
+  #             below its epoch-0 warm-start baseline; abort if tripped
+  #             egmd_guard_trip_limit times in a row (catastrophic-forgetting
+  #             tripwire).
+  f1_eval_interval: 1
+  early_stop_patience: 4
+  egmd_guard_drop: 2.0
+  egmd_guard_trip_limit: 2
+
+# Loss Configuration — VERBATIM from configs/drums_v14.yaml. Both the synthetic
+# corpus and the E-GMD replay carry real class + velocity labels, so Stage-2
+# and the velocity head stay supervised (they help the shared backbone and
+# guard against class drift). To run a detector-ONLY fine-tune instead, set
+# classify_loss_weight and velocity_loss_weight to 0.0 (NOTES.md §1/§6.3).
+loss:
+  onset_pos_weight: 20.0
+  onset_focal_gamma: 2.0
+  classify_class_weight: [1.0, 1.2, 1.1, 50.0, 5.0, 45.0, 8.0, 25.0]
+  classify_focal_gamma: 1.0
+  classify_label_smoothing: 0.05
+  onset_loss_weight: 1.0
+  classify_loss_weight: 2.0
+  velocity_loss_weight: 0.3
+
+# Multi-source mixing (NOTES.md §6.3). synthetic_frac is the target expected
+# fraction of synthetic songs drawn per epoch via WeightedRandomSampler; the
+# remainder is drawn from the E-GMD replay buffer. Epoch length is pinned to
+# the synthetic-train count. Ignored (uniform sampling) if no E-GMD replay
+# songs are present in the manifest.
+mixing:
+  synthetic_frac: 0.75
+
+# Augmentation — lightweight only (handled inside DrumsV14FullSongDataset).
+augmentation:
+  enabled: true
+  freq_mask_param: 27
+  time_mask_param: 50
+
+# Onset eval / peak-picking — mirrors inference (detect_onsets_v14):
+#   find_peaks(height=onset_threshold, distance=min_distance_ms) and a
+#   ±frame_tolerance match window for frame-F1.
+eval:
+  onset_threshold: 0.5
+  min_distance_ms: 20.0
+  frame_tolerance: 2
+
+# Weights & Biases — off unless WANDB_MODE is set in the environment
+# (same opt-in pattern as scripts/train_onset_classifier.py).
+wandb:
+  project: "strum-v14-frontensemble"
+  tags: ["ws5c", "v14", "front-ensemble", "finetune"]
