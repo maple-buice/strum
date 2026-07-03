@@ -232,8 +232,12 @@ ENSEMBLE_MODELS = [
 # (lowfreq branch, HPSS, enhanced spectral) so window extraction is unchanged.
 # STRUM_V12C_VARIANT=edm uses the EDM-fine-tuned V12c (same architecture) and
 # additionally hands it the Crash ensemble row (see PER_CLASS_WEIGHTS below).
+# STRUM_V12C_VARIANT=percussion uses the percussion-fine-tuned V12c (same
+# architecture) and likewise claims the Crash ensemble row (see
+# PER_CLASS_WEIGHTS below).
 _V12C_VARIANT = os.environ.get("STRUM_V12C_VARIANT", "clean")
 _V12C_EDM_ACTIVE = False
+_V12C_PERCUSSION_ACTIVE = False
 if _V12C_VARIANT == "community":
     for _i, _m in enumerate(ENSEMBLE_MODELS):
         if _m["name"] == "V12c":
@@ -264,6 +268,29 @@ elif _V12C_VARIANT == "edm":
         logger.warning(
             "STRUM_V12C_VARIANT=edm requested but "
             f"{_EDM_CONFIG} / {_EDM_CHECKPOINT} missing — "
+            "keeping stock V12c and stock ensemble weights"
+        )
+elif _V12C_VARIANT == "percussion":
+    _PERCUSSION_CONFIG = "configs/onset_classifier_v12c_percussion.yaml"
+    _PERCUSSION_CHECKPOINT = "checkpoints/onset_classifier_v12c_percussion/best_f1.pt"
+    if Path(_PERCUSSION_CONFIG).exists() and Path(_PERCUSSION_CHECKPOINT).exists():
+        for _i, _m in enumerate(ENSEMBLE_MODELS):
+            if _m["name"] == "V12c":
+                ENSEMBLE_MODELS[_i] = {
+                    "name": "V12c",
+                    "config": _PERCUSSION_CONFIG,
+                    "checkpoint": _PERCUSSION_CHECKPOINT,
+                }
+                _V12C_PERCUSSION_ACTIVE = True
+                logger.info(
+                    "STRUM_V12C_VARIANT=percussion: V12c slot → percussion fine-tune "
+                    f"({_PERCUSSION_CHECKPOINT}); percussion crash-weight table will be used"
+                )
+                break
+    else:
+        logger.warning(
+            "STRUM_V12C_VARIANT=percussion requested but "
+            f"{_PERCUSSION_CONFIG} / {_PERCUSSION_CHECKPOINT} missing — "
             "keeping stock V12c and stock ensemble weights"
         )
 
@@ -2349,6 +2376,19 @@ if _V12C_EDM_ACTIVE:
     logger.info(
         "EDM variant weight table ACTIVE: Crash ensemble row → V12c(edm) solo "
         "(stock: V17 solo)"
+    )
+
+# Percussion variant weight table: with STRUM_V12C_VARIANT=percussion active
+# (config + checkpoint present, see the variant swap above), the fine-tuned
+# V12c (idx 3) claims the Crash row, mirroring the EDM variant above. Only the
+# Crash row changes; all other rows — and everything when the variant is off —
+# are untouched. STRUM_V12C_VARIANT only ever holds one value at a time, so
+# this and the EDM override above are mutually exclusive.
+if _V12C_PERCUSSION_ACTIVE:
+    PER_CLASS_WEIGHTS[6] = [0.00, 0.0, 0.00, 1.00, 0.00, 0.00, 0.00]
+    logger.info(
+        "Percussion variant weight table ACTIVE: Crash ensemble row → "
+        "V12c(percussion) solo (stock: V17 solo)"
     )
 
 # Optional per-class V12c weight scaling for ensemble re-tuning experiments.

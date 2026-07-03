@@ -1,0 +1,119 @@
+# Onset Window Classifier V12c-Percussion — V12_clean fine-tuned on a
+# synthetic non-kit-percussion corpus (WS4b).
+#
+# Purpose: percussion-variant lane mapping so the ensemble can recognize
+# non-kit ensemble percussion (mallets, marching battery, orchestral
+# accessories) it currently misreads through a real-drum-kit lens. Primary
+# gate (execution plan): Yo Shakespeare lane accuracy >= 40%, no rock
+# regression. Selected at inference the same way the EDM variant is (see
+# configs/onset_classifier_v12c_edm.yaml, batch_infer_hybrid.py's
+# STRUM_V12C_VARIANT switch) — wiring an actual STRUM_V12C_VARIANT=percussion
+# arm happens later, on its own branch; this config only needs to exist and
+# train correctly today.
+#
+# Architecture is IDENTICAL to v12_clean/v12c_edm (window extraction
+# unchanged: 100ms+400ms @ 44.1kHz, dual mel + CQT lowfreq branch, HPSS,
+# enhanced spectral). Differences from v12c_edm are corpus + epoch count
+# only, each commented below.
+#
+# Requires: CQT added to the cache via scripts/add_cqt_to_cache.py
+# (the dataset prefers {split}_cqt.npy over {split}_mel_lowfreq.npy) — done,
+# see validation/ws4b/DATA_REPORT.md.
+#
+# Never overwrites stock checkpoints: outputs go to
+# checkpoints/onset_classifier_v12c_percussion/.
+
+paths:
+  # data_dir built by scripts/build_synth_percussion_dataset.py from the
+  # WS5b synthetic corpus (ws5_assets/corpus/, 266 pieces: 239 train / 27
+  # test, split by piece, stratified by preset). See
+  # validation/ws4b/corpus_options.md (Option C) and
+  # validation/ws4b/DATA_REPORT.md for the instrument->lane mapping applied.
+  data_dir: "datasets/ws4b_percussion"
+  output_dir: "outputs/onset_classifier_v12c_percussion"
+  checkpoint_dir: "checkpoints/onset_classifier_v12c_percussion"
+
+# Fresh cache for this corpus (preprocess_onset_windows.py --output-dir
+# outputs/onset_classifier_v12c_percussion, then add_cqt_to_cache.py).
+cache_dir: "outputs/onset_classifier_v12c_percussion/cache"
+
+dataset:
+  sample_rate: 44100
+  n_mels: 128
+  fine_n_fft: 1024
+  fine_hop: 256
+  coarse_n_fft: 4096
+  coarse_hop: 512
+  window_before_ms: 100
+  window_after_ms: 400
+  context_size: 4
+
+model:
+  # Identical to v12_clean/v12c_edm — required for warm-start weight compatibility.
+  num_classes: 8
+  branch_channels: [1, 32, 64, 128, 256]
+  context_size: 4
+  context_hidden: 64
+  spectral_dim: 48
+  classifier_hidden: 512
+  dropout: 0.3
+  use_freq_attn: false
+  use_hpss: true
+  enhanced_spectral: true
+  use_lowfreq_branch: true    # CQT branch (128 bins, trimmed from 144)
+
+# Fine-tune init: v12_clean best checkpoint via warm_start (weights only;
+# fresh optimizer/scheduler), matching the WS4 template ("never from
+# scratch"). Deliberately NOT resume_from, same reasoning as v12c_edm.yaml.
+warm_start:
+  enabled: true
+  checkpoint: "checkpoints/onset_classifier_v12_clean/best_f1.pt"
+
+# Unchanged from v12c_edm: "rarest" primary-class strategy keeps rare
+# co-occurring classes (Crash/FloorTom/LowTom here — this corpus's smallest
+# classes, 1.8-2.1% of hits) visible to the class-balanced sampler instead of
+# being masked under argmax by a simultaneous Kick/Snare/HiHat/Ride hit.
+primary_class_strategy: "rarest"
+
+training:
+  batch_size: 256
+  # CHANGE vs v12c_edm (35 epochs): this corpus preprocesses to 134,526
+  # train windows vs EDM's ~99k — 1.36x more windows/epoch at the same batch
+  # size, so fewer epochs are needed to reach a comparable number of gradient
+  # steps for a short fine-tune. 24 epochs here ~= 35 * (99k/134.5k) keeps
+  # total optimizer steps in the same ballpark as the EDM fine-tune rather
+  # than proportionally scaling wall-clock time up for a smaller effective
+  # marginal benefit (early-stop patience below will cut it further if val
+  # F1 plateaus first).
+  epochs: 24
+  learning_rate: 0.0001     # unchanged vs v12c_edm — same ~10x-lower fine-tune LR
+  min_lr: 0.000001          # unchanged vs v12c_edm
+  weight_decay: 0.0001
+  gradient_clip: 1.0
+  num_workers: 0
+  eval_interval: 1          # unchanged vs v12c_edm — track best_f1 every epoch
+  checkpoint_every: 5
+  early_stop_patience: 10   # unchanged vs v12c_edm
+  max_train_batches: 2000   # ~134.5k/256 ~= 525 batches/epoch; 2000 is still "all"
+  max_val_batches: 500      # ~15.7k/256 ~= 61 batches; 500 is still "all"
+  mixup_alpha: 0.3
+  # NOTE: no resume_from (see warm_start above).
+
+loss:
+  # Unchanged from v12_clean/v12c_edm. Index order matches CLASS_NAMES
+  # (Kick, Snare, HiHat, HighTom, Ride, LowTom, Crash, FloorTom); the
+  # up-weighting of HighTom/LowTom (2.0) and FloorTom (1.5) here is even more
+  # relevant than for v12c_edm since this corpus's tom-mapped classes
+  # (HighTom 5.3%, LowTom 1.8%, FloorTom 2.1% of hits — see
+  # validation/ws4b/DATA_REPORT.md) are the smallest three of the eight.
+  class_weights: [1.0, 1.0, 1.0, 2.0, 1.0, 2.0, 1.0, 1.5]
+  focal_gamma: 0.0
+  label_smoothing: 0.0
+
+augmentation:
+  # Unchanged from v12_clean/v12c_edm.
+  noise_std: 0.005
+  gain_db_range: [-3.0, 3.0]
+  spec_augment: true
+  freq_mask_width: 12
+  time_mask_width: 8
