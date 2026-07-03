@@ -761,12 +761,16 @@ def apply_tomcym_reclassification(
 # screen in scripts/paper/build_v4_envelope_benchmark.py) is below a floor,
 # route onset detection + classification to fallback audio instead.
 #   STRUM_STEM_FALLBACK=0       → disable (exactly the previous behavior)
-#   STRUM_DRUMS_RMS_FLOOR=x     → override the floor (default 0.018)
+#   STRUM_DRUMS_RMS_FLOOR=x     → override the floor (default 0.010; dead
+#                                 Demucs stems measure ≤~0.008, usable-but-
+#                                 quiet stems ≥~0.013 — library-wide survey
+#                                 of 261 songs found only 2 in between, and
+#                                 both score better WITHOUT the fallback)
 #   STRUM_STEM_FALLBACK_MODE    → force fallback source: "mix" (original full
 #                                 mix — the default; it measured best) or
 #                                 "other" (drums+other stem mix).
 STEM_FALLBACK_ENABLED = os.environ.get("STRUM_STEM_FALLBACK", "1") == "1"
-DRUMS_RMS_FLOOR = float(os.environ.get("STRUM_DRUMS_RMS_FLOOR", "0.018"))
+DRUMS_RMS_FLOOR = float(os.environ.get("STRUM_DRUMS_RMS_FLOOR", "0.010"))
 STEM_FALLBACK_MODE = os.environ.get("STRUM_STEM_FALLBACK_MODE", "")
 
 
