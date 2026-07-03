@@ -42,6 +42,53 @@ from src.models.onset_classifier_cached_dataset import (
 )
 
 
+# ── Optional Weights & Biases logging (fully opt-in, zero-effect by default) ──
+# Active only when BOTH: (a) the `wandb` package imports, and (b) the WANDB_MODE
+# environment variable is set (e.g. WANDB_MODE=offline). Any failure is swallowed
+# so training behaviour is byte-for-byte identical when W&B is absent/unset.
+_WANDB = None  # module-level run handle; None means "disabled"
+
+
+def _maybe_init_wandb(config) -> None:
+    """Start a W&B run iff importable AND WANDB_MODE is set. Never raises."""
+    global _WANDB
+    if not os.environ.get("WANDB_MODE"):
+        return
+    try:
+        import wandb  # noqa: PLC0415
+        cfg = OmegaConf.to_container(config, resolve=True) if config is not None else None
+        _WANDB = wandb.init(
+            project=os.environ.get("WANDB_PROJECT", "strum-onset-classifier"),
+            name=os.environ.get("WANDB_RUN_NAME") or Path(sys.argv[-1]).stem,
+            config=cfg,
+        )
+        print(f"  W&B logging enabled (mode={os.environ['WANDB_MODE']})")
+    except Exception as e:  # pragma: no cover - defensive, keeps training running
+        _WANDB = None
+        print(f"  W&B logging unavailable ({e}); continuing without it")
+
+
+def _wandb_log(metrics: dict, step: int | None = None) -> None:
+    """Log a metrics dict to W&B if active. Never raises."""
+    if _WANDB is None:
+        return
+    try:
+        _WANDB.log(metrics, step=step)
+    except Exception:
+        pass
+
+
+def _wandb_finish() -> None:
+    global _WANDB
+    if _WANDB is None:
+        return
+    try:
+        _WANDB.finish()
+    except Exception:
+        pass
+    _WANDB = None
+
+
 def onset_collate_fn(batch):
     """Custom collate that handles optional mel_lowfreq and crash_flux."""
     # batch is list of (mel_fine, mel_coarse, context, label, mel_lowfreq_or_None, crash_flux_or_None)
@@ -431,13 +478,26 @@ def train(config):
     print("=" * 70)
     print(f"Config: {sys.argv[-1]}")
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # STRUM_DEVICE override, else cuda > mps > cpu (same policy as
+    # batch_infer_hybrid.pick_device). On MPS keep
+    # PYTORCH_ENABLE_MPS_FALLBACK=1 set: a few ops fall back to CPU.
+    env_device = os.environ.get("STRUM_DEVICE")
+    if env_device:
+        device = torch.device(env_device)
+    elif torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
     if torch.cuda.is_available():
         gpu_name = torch.cuda.get_device_name(0)
         gpu_mem = torch.cuda.get_device_properties(0).total_memory / 1e9
         print(f"Device: {device} ({gpu_name}, {gpu_mem:.1f} GB)")
     else:
         print(f"Device: {device}")
+
+    _maybe_init_wandb(config)
 
     # Paths
     data_dir = Path(config.paths.data_dir)
@@ -809,6 +869,14 @@ def train(config):
                   f"F1={overall_f1*100:.1f}% lr={lr:.1e} ({elapsed:.0f}s)")
             print_results(results, epoch + 1)
 
+            _wandb_log({
+                "train/loss": train_loss,
+                "val/loss": val_loss,
+                "val/overall_f1": overall_f1,
+                "lr": lr,
+                "epoch": epoch + 1,
+            }, step=epoch + 1)
+
             # Memory cleanup before sampler rebuild
             gc.collect()
             if torch.cuda.is_available():
@@ -860,6 +928,8 @@ def train(config):
         else:
             print(f"  Epoch {epoch+1}: train={train_loss:.4f} "
                   f"lr={lr:.1e} ({elapsed:.0f}s)")
+            _wandb_log({"train/loss": train_loss, "lr": lr, "epoch": epoch + 1},
+                       step=epoch + 1)
 
         # Periodic checkpoint
         if (epoch + 1) % tcfg.checkpoint_every == 0:
@@ -927,6 +997,9 @@ def train(config):
     # Save training history
     print(f"\n  Best F1: {best_f1*100:.1f}%")
     print(f"  Checkpoint: {best_path}")
+
+    _wandb_log({"final/overall_f1": results["overall_f1"], "final/best_f1": best_f1})
+    _wandb_finish()
 
 
 if __name__ == "__main__":

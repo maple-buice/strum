@@ -230,7 +230,10 @@ ENSEMBLE_MODELS = [
 # STRUM_V12C_VARIANT=community uses configs/onset_classifier_v12c_community.yaml
 # + checkpoints/onset_classifier_v12c_community/best_f1.pt. Architecture is identical
 # (lowfreq branch, HPSS, enhanced spectral) so window extraction is unchanged.
+# STRUM_V12C_VARIANT=edm uses the EDM-fine-tuned V12c (same architecture) and
+# additionally hands it the Crash ensemble row (see PER_CLASS_WEIGHTS below).
 _V12C_VARIANT = os.environ.get("STRUM_V12C_VARIANT", "clean")
+_V12C_EDM_ACTIVE = False
 if _V12C_VARIANT == "community":
     for _i, _m in enumerate(ENSEMBLE_MODELS):
         if _m["name"] == "V12c":
@@ -240,6 +243,29 @@ if _V12C_VARIANT == "community":
                 "checkpoint": "checkpoints/onset_classifier_v12c_community/best_f1.pt",
             }
             break
+elif _V12C_VARIANT == "edm":
+    _EDM_CONFIG = "configs/onset_classifier_v12c_edm.yaml"
+    _EDM_CHECKPOINT = "checkpoints/onset_classifier_v12c_edm/best_f1.pt"
+    if Path(_EDM_CONFIG).exists() and Path(_EDM_CHECKPOINT).exists():
+        for _i, _m in enumerate(ENSEMBLE_MODELS):
+            if _m["name"] == "V12c":
+                ENSEMBLE_MODELS[_i] = {
+                    "name": "V12c",
+                    "config": _EDM_CONFIG,
+                    "checkpoint": _EDM_CHECKPOINT,
+                }
+                _V12C_EDM_ACTIVE = True
+                logger.info(
+                    "STRUM_V12C_VARIANT=edm: V12c slot → EDM fine-tune "
+                    f"({_EDM_CHECKPOINT}); EDM crash-weight table will be used"
+                )
+                break
+    else:
+        logger.warning(
+            "STRUM_V12C_VARIANT=edm requested but "
+            f"{_EDM_CONFIG} / {_EDM_CHECKPOINT} missing — "
+            "keeping stock V12c and stock ensemble weights"
+        )
 
 # ── Onset window extraction params (must match training preprocessing) ──
 OC_SR = 44100
@@ -2310,6 +2336,20 @@ PER_CLASS_WEIGHTS = {
     6: [0.00, 0.0, 0.00, 0.00, 0.00, 0.00, 1.00],    # Crash     - V17 SOLO (84.2% F1, fixes 52% miss rate)
     7: [0.08, 0.02, 0.25, 0.15, 0.25, 0.25, 0.00],   # FloorTom  - V17 OFF
 }
+
+# EDM variant weight table: with STRUM_V12C_VARIANT=edm active (config +
+# checkpoint present, see the variant swap above), the fine-tuned V12c (idx 3)
+# claims the Crash row. Stock gives Crash to V17 solo; on installs without the
+# V17 checkpoint that row totals 0, the crash logit stays 0 (sigmoid 0.5 ≥
+# crash threshold 0.35) and crash fires on nearly every onset. Only the Crash
+# row changes; all other rows — and everything when the variant is off — are
+# untouched.
+if _V12C_EDM_ACTIVE:
+    PER_CLASS_WEIGHTS[6] = [0.00, 0.0, 0.00, 1.00, 0.00, 0.00, 0.00]
+    logger.info(
+        "EDM variant weight table ACTIVE: Crash ensemble row → V12c(edm) solo "
+        "(stock: V17 solo)"
+    )
 
 # Optional per-class V12c weight scaling for ensemble re-tuning experiments.
 # STRUM_V12C_SCALE="kick:1.5,hihat:0.5,floortom:0.5" multiplies V12c (idx 3) weight

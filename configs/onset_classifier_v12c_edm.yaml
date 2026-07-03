@@ -1,0 +1,100 @@
+# Onset Window Classifier V12c-EDM — V12_clean fine-tuned on an EDM/electronic corpus
+#
+# Purpose: EDM lane-mapping variant (fixes crash-spam on electronic material).
+# Selected at inference with STRUM_V12C_VARIANT=edm, which swaps the V12c
+# ensemble slot to this config/checkpoint AND gives this model the Crash
+# ensemble row (stock gives Crash to V17 solo, absent on installs without the
+# V17 checkpoint). See scripts/batch_infer_hybrid.py.
+#
+# Derived from configs/onset_classifier_v12_clean.yaml. Architecture is
+# IDENTICAL (window extraction unchanged: 100ms+400ms @ 44.1kHz, dual mel +
+# CQT lowfreq branch, HPSS, enhanced spectral). Differences are fine-tuning
+# hyperparameters only, each commented below.
+#
+# Requires: CQT added to the cache via scripts/add_cqt_to_cache.py
+# (the dataset prefers {split}_cqt.npy over {split}_mel_lowfreq.npy).
+#
+# Never overwrites stock checkpoints: outputs go to
+# checkpoints/onset_classifier_v12c_edm/.
+
+paths:
+  # data_dir built by scripts/build_finetune_dataset.py from
+  # validation/ws4/corpus_manifest.json (91 train / 9 test songs, split by song)
+  data_dir: "datasets/ws4_edm"
+  output_dir: "outputs/onset_classifier_v12c_edm"
+  checkpoint_dir: "checkpoints/onset_classifier_v12c_edm"
+
+# Fresh cache for this corpus (preprocess_onset_windows.py --output-dir
+# outputs/onset_classifier_v12c_edm, then add_cqt_to_cache.py).
+cache_dir: "outputs/onset_classifier_v12c_edm/cache"
+
+dataset:
+  sample_rate: 44100
+  n_mels: 128
+  fine_n_fft: 1024
+  fine_hop: 256
+  coarse_n_fft: 4096
+  coarse_hop: 512
+  window_before_ms: 100
+  window_after_ms: 400
+  context_size: 4
+
+model:
+  # Identical to v12_clean — required for warm-start weight compatibility.
+  num_classes: 8
+  branch_channels: [1, 32, 64, 128, 256]
+  context_size: 4
+  context_hidden: 64
+  spectral_dim: 48
+  classifier_hidden: 512
+  dropout: 0.3
+  use_freq_attn: false
+  use_hpss: true
+  enhanced_spectral: true
+  use_lowfreq_branch: true    # CQT branch (128 bins, trimmed from 144)
+
+# Fine-tune init: v12_clean best checkpoint via warm_start (weights only;
+# fresh optimizer/scheduler). Deliberately NOT resume_from — v12_clean.yaml's
+# resume_from (epoch_105.pt) is removed here: that mechanism restores
+# optimizer state and epoch counters from a checkpoint that doesn't exist on
+# this install and is wrong for fine-tuning anyway.
+warm_start:
+  enabled: true
+  checkpoint: "checkpoints/onset_classifier_v12_clean/best_f1.pt"
+
+# CHANGE vs v12_clean (argmax): "rarest" primary-class strategy so
+# crash-positive onsets are visible to the class-balanced sampler (crash
+# co-occurs with kick/snare and is masked under argmax; this is the V17
+# crash-fix). The EDM variant must carry the Crash ensemble row solo, so
+# crash exposure during fine-tuning is the point of the exercise.
+primary_class_strategy: "rarest"
+
+training:
+  batch_size: 256
+  epochs: 35                # CHANGE vs v12_clean (120): short fine-tune
+  learning_rate: 0.0001     # CHANGE vs v12_clean (0.001): ~10x lower for fine-tuning
+  min_lr: 0.000001          # CHANGE vs v12_clean (5e-6): scaled with the lower LR
+  weight_decay: 0.0001
+  gradient_clip: 1.0
+  num_workers: 0
+  eval_interval: 1          # CHANGE vs v12_clean (2): short run + small val set — track best_f1 every epoch
+  checkpoint_every: 5
+  early_stop_patience: 10   # CHANGE vs v12_clean (25): counted in evals; 25 would never trigger in 35 epochs
+  max_train_batches: 2000   # effectively "all" on this corpus (~<1000 batches/epoch)
+  max_val_batches: 500
+  mixup_alpha: 0.3
+  # NOTE: no resume_from (see warm_start above).
+
+loss:
+  # Unchanged from v12_clean.
+  class_weights: [1.0, 1.0, 1.0, 2.0, 1.0, 2.0, 1.0, 1.5]
+  focal_gamma: 0.0
+  label_smoothing: 0.0
+
+augmentation:
+  # Unchanged from v12_clean.
+  noise_std: 0.005
+  gain_db_range: [-3.0, 3.0]
+  spec_augment: true
+  freq_mask_width: 12
+  time_mask_width: 8
